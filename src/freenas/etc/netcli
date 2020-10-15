@@ -24,7 +24,6 @@
 # IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 #
-# $FreeBSD$
 #####################################################################
 
 import copy
@@ -323,7 +322,6 @@ def produce_django_model(ds):
 
 
 LAGGInterfaceMembers = produce_django_model("network.lagginterfacemembers")
-VLAN = produce_django_model("network.vlan")
 GlobalConfiguration = produce_django_model("network.globalconfiguration")
 StaticRoute = produce_django_model("network.staticroute")
 Support = produce_django_model("system.support")
@@ -472,29 +470,28 @@ def configure_interface():
 
     # this shouldn't happen but check anyway
     if not choices:
-        print('No interfaces detected!')
+        print('No interfaces detected')
         return False
-    else:
-        while True:
-            for idx, nic in enumerate(choices, start=1):
-                print(f"{idx}) {nic}")
 
-            _input = input("Select an interface (q to quit): ")
-            try:
-                _input = int(_input)
-            except ValueError:
-                if _input.lower().startswith("q"):
-                    return False
-                else:
-                    print("Invalid option")
-                    continue
+    while True:
+        for idx, nic in enumerate(choices, start=1):
+            print(f"{idx}) {nic}")
 
-            if _input in range(1, len(choices) + 1):
-                nic = choices[_input - 1]
-                break
-            else:
-                print("Invalid option")
-                continue
+        _input = input("Select an interface (q to quit): ")
+        if _input.lower().startswith("q"):
+            return False
+        if _input.isdigit():
+            _input = int(_input)
+        else:
+            print("Invalid option")
+            continue
+
+        if _input in range(1, len(choices) + 1):
+            nic = choices[_input - 1]
+            break
+        else:
+            print("Invalid option")
+            continue
 
     # check to see if this interface has already been configured or exists in the db
     iface_configured = []
@@ -505,7 +502,7 @@ def configure_interface():
         pass
 
     # we need to delete the interface from db before we proceed
-    if iface_configured:
+    if iface_configured and not nic.startswith(('vlan', 'lagg')):
         while True:
             print("Interface has been previously configured, the current configuration must be deleted before proceeding.")
             _input = input("Delete interface configuration? (y/n): ")
@@ -1127,156 +1124,152 @@ def delete_lagg_interface():
 
 def configure_vlan(*args):
 
-    menu = [
-        [_("Create VLAN Interface"), create_vlan],
-        [_("Delete VLAN Interface"), delete_vlan],
-    ]
-    menu_map = {}
-    menu_max = 0
-    for item in menu:
-        menu_max = menu_max + 1
-        menu_map[menu_max] = item
+    vlan_menu = {
+        '1': "Create VLAN Interface",
+        '2': "Delete VLAN Interface",
+        '3': "Quit",
+    }
+    for k, v in vlan_menu.items():
+        print(f'{k}) {v}')
 
+    create_vlan = delete_vlan = False
     while True:
-        print()
-
-        for index in menu_map:
-            print("%d) %s" % (index, menu_map[index][0]))
-
-        _input = input(_("Enter an option from 1-%d (enter q to quit): ") % (menu_max))
-        if _input.isdigit() and int(_input) in range(1, menu_max + 1):
-            ch = int(_input)
-            if ch in menu_map:
-                menu_map[ch][1]()
+        _input = input(f"\nEnter an option from 1-{len(vlan_menu)} (q to quit): ")
+        if _input in vlan_menu.keys():
+            if _input == '3':
+                return False
+            elif _input == '1':
+                create_vlan = True
                 break
-        elif _input.lower().startswith("q"):
-            return False
-        continue
-
-
-def create_vlan():
-
-    vlan = VLAN()
-
-    # Select parent interface
-    while True:
-        nics = []
-        choices = NICChoices(novlan=True, exclude_configured=False)
-        for i, c in enumerate(choices):
-            nics.append(c[0])
-            print("%2d) %s" % (i + 1, nics[i]))
-
-        _input = input(_("Select a parent interface (q to quit): "))
-        if _input.isdigit() and int(_input) in range(1, len(nics) + 1):
-            vlan_pint = nics[int(_input) - 1]
-            break
-        elif _input.lower().startswith("q"):
-            return True
-    # Get interface name
-    while True:
-        vlan_vint = input(
-            _("Enter an interface name ") + _("(vlanX) or a to abort: ")
-        )
-        if vlan_vint == "a":
-            return
-        reg = re.search(r'vlan(\d+)', vlan_vint)
-        if not reg:
-            print(_("Interface name must be vlanX where X is a number"))
-            continue
-        vlan_vint = f'vlan{int(reg.group(1))}'
-        break
-    # Get vlan tag
-    while True:
-        vlan_tag = input(_("Enter a VLAN Tag or a to abort: "))
-        if vlan_tag == "a":
-            return
-        if not re.match(r'\d+', vlan_tag):
-            print(_("VLAN Tag must be an integer"))
-            continue
-        break
-    # Get VLAN description
-    vlan_description = input(_("Enter VLAN description: "))
-
-    vlan.vlan_pint = vlan_pint
-    vlan.vlan_vint = vlan_vint
-    vlan.vlan_tag = vlan_tag
-    vlan.vlan_description = vlan_description
-    print(_("Saving VLAN interface:"), end=' ')
-    try:
-        vlan.save()
-        qs = Interfaces.objects.filter(int_interface=vlan_pint)
-        if not qs.exists():
-            vlan_interface = Interfaces(
-                int_interface=vlan_pint,
-                int_name=vlan_pint,
-                int_dhcp=False,
-                int_ipv6auto=False,
-                int_options='up',
-            )
-            vlan_interface.save()
+            elif _input == '2':
+                delete_vlan = True
+                break
         else:
-            vlan_interface = qs[0]
-            if 'up' not in vlan_interface.int_options:
-                vlan_interface.int_options += ' up'
-                vlan_interface.save()
-    except Exception:
-        print(_("Failed"))
-        return False
-    print(_("Ok"))
-    print(_("Restarting network:"), end=' ')
-    try:
-        with Client() as c:
-            c.call('service.start', 'network')
-    except Exception:
-        print(_("Failed"))
-        return False
-    print(_("ok"))
-    return True
+            print("Invalid option")
+            continue
 
+    # get our list of nics
+    choices = get_nic_choices()
 
-def delete_vlan():
-    vlan_interfaces = VLAN.objects.all()
-
-    if not vlan_interfaces.exists():
-        print()
-        print("No VLAN interfaces configured")
-        print()
-        print("Press enter to continue")
-        input()
-        return False
-
-    vlan_map = {}
-    while True:
-        print()
-        print("Select which VLAN interface you would like to delete:")
-        print()
-
-        for idx, vi in enumerate(vlan_interfaces):
-            vlan_map[idx + 1] = vi
-
-            print("%d) %s" % (idx + 1, str(vi.vlan_vint)))
-
-        print()
-
-        _input = input(_("Select an interface (q to quit): "))
-        if _input.isdigit() and int(_input) in range(1, idx + 2):
-            ch = int(_input)
-            if ch in vlan_map:
-                vlan = vlan_map[ch]
-                break
-        elif _input.lower().startswith("q"):
+    # prep list of nics if creating vlan
+    if create_vlan:
+        choices = [i for i in choices if not i.startswith('vlan')]
+        # this shouldn't happen but check anyway
+        if not choices:
+            print("No parent interfaces detected")
             return False
-        continue
 
-    print(_("Deleting VLAN interface:"), end=' ')
-    try:
-        vlan.delete()
-    except Exception:
-        print(_("Failed"))
-        return False
-    print(_("Ok"))
+        # prompt for vlan parent interface
+        while True:
+            for idx, nic in enumerate(choices, start=1):
+                print(f"{idx}) {nic}")
 
-    return True
+            _parent_input = input("Select a parent interface (q to quit): ")
+            if _parent_input.lower().startswith("q"):
+                return False
+            elif _parent_input.isdigit():
+                _parent_input = int(_parent_input)
+            else:
+                print("Invalid option")
+                continue
+
+            if _parent_input in range(1, len(choices) + 1):
+                parent_int = choices[_parent_input - 1]
+                break
+            else:
+                print("Invalid option")
+                continue
+
+        # get vlan interface name
+        while True:
+            _vlan_name = input("Enter a vlan name vlanX where 'X' is a number (q to quit): ")
+            if _vlan_name.lower().startswith('q'):
+                return False
+            elif not _vlan_name.lower().startswith('vlan'):
+                continue
+            else:
+                try:
+                    int(_vlan_name.lower().split('vlan')[1])
+                    break
+                except Exception:
+                    continue
+
+        # get vlan tag
+        while True:
+            _vlan_tag = input("Enter a vlan tag (q to quit): ")
+            if _vlan_tag.lower().startswith('q'):
+                return False
+            elif _vlan_tag.isdigit():
+                if int(_vlan_tag) < 1 or int(_vlan_tag) > 4094:
+                    print("vlan tag must be between 1 and 4094")
+                    continue
+                else:
+                    _vlan_tag = int(_vlan_tag)
+                    break
+            else:
+                print("vlan tag must be an integer")
+                continue
+
+        # get vlan description
+        _vlan_desc = input("vlan description (enter for none): ")
+
+        # send it off to the API
+        print("Saving vlan interface")
+        options = {
+            'name': _vlan_name,
+            'description': _vlan_desc,
+            'type': 'VLAN',
+            'vlan_parent_interface': parent_int,
+            'vlan_tag': _vlan_tag,
+        }
+        try:
+            with Client() as c:
+                c.call('interface.create', options)
+                c.call('service.start', 'network')
+                print("Successfully created vlan")
+                return True
+        except Exception as e:
+            print("Failed creating vlan interface with error: \n%s", e)
+            return False
+
+    # prep list of nics if deleting vlan
+    if delete_vlan:
+        choices = [i for i in choices if i.startswith('vlan')]
+        # means no vlans are created so nothing to do
+        if not choices:
+            print("No vlan interfaces to delete")
+            input("Press enter to return to main screen\n")
+            return False
+
+    while True:
+        for idx, nic in enumerate(choices, start=1):
+            print(f"{idx}) {nic}")
+
+        _vlan_to_delete = input("Select a vlan to delete (q to quit): ")
+        if _vlan_to_delete.lower().startswith("q"):
+            return False
+        elif _vlan_to_delete.isdigit():
+            _vlan_to_delete = int(_vlan_to_delete)
+        else:
+            print("Invalid option")
+            continue
+
+        if _vlan_to_delete in range(1, len(choices) + 1):
+            vlan_to_delete = choices[_vlan_to_delete - 1]
+        else:
+            print("Invalid option")
+            continue
+
+        # send it off to the API
+        try:
+            with Client() as c:
+                c.call('interface.delete', vlan_to_delete)
+                c.call('service.start', 'network')
+                print("Successfully deleted vlan")
+                return True
+        except Exception as e:
+            print("Failed deleting vlan interface with error: \n%s", e)
+            return False
 
 
 def configure_ipv4_default_route(gc):
