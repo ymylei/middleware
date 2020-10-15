@@ -38,6 +38,7 @@ import subprocess
 import time
 import traceback
 
+import ipaddress
 import ipaddr
 import sqlite3
 
@@ -475,391 +476,465 @@ def get_lagg_nics():
 
 
 def configure_interface_stub(*args):
+
     retval = configure_interface()
-    with Client() as c:
-        c.call('service.restart', 'http')
+
+    # only need to reload http service if
+    # interface changes occurred
+    if retval:
+        with Client() as c:
+            c.call('service.reload', 'http')
+
     return retval
 
 
 def configure_interface():
-    while True:
-        nics = []
-        choices = NICChoices(include_vlan_parent=True, exclude_configured=False)
-        for i, c in enumerate(choices):
-            nics.append(c[0])
-            print("%d) %s" % (i + 1, nics[i]))
 
-        _input = input(_("Select an interface (q to quit): "))
-        if _input.isdigit() and int(_input) in range(1, len(nics) + 1):
-            nic = nics[int(_input) - 1]
-            break
-        elif _input.lower().startswith("q"):
-            return True
+    choices = []
+    try:
+        # get the interfaces
+        with Client() as c:
+            choices = c.call('interface.query')
+    except Exception as e:
+        print("Fatal error obtaining interfaces with error: \n%s", e)
+        return False
 
-    iface = Interfaces.objects.filter(int_interface=nic)
-    if iface:
-        iface = iface[0]
-    else:
-        iface = Interfaces()
+    if choices:
+        # sort the nics and then print them numbered
+        # starting at number 1
+        nics = sorted(i['id'] for i in choices)
+        while True:
+            for idx, nic in enumerate(nics, start=1):
+                print(f"{idx}) {nic}")
 
-    while True and iface.id:
-        _input = input(_("Delete interface? (y/n) ")).lower()
-        if _input.startswith("y"):
-            print(_("Deleting interface configuration:"), end=' ')
-            iface.delete()
-            print(_("Ok"))
-            print(_("Restarting network:"), end=' ')
+            _input = input("Select an interface (q to quit): ")
             try:
-                with Client() as c:
-                    c.call('service.start', 'network')
-            except Exception:
-                print(_("Failed"))
-            print(_("ok"))
-            print(_("Restarting routing:"), end=' ')
-            try:
-                with Client() as c:
-                    c.call('service.reload', 'networkgeneral')
-            except Exception:
-                print(_("Failed"))
-            print(_("ok"))
-            return True
-        elif _input.startswith('n'):
-            break
-        else:
-            continue
-
-    while True:
-        _input = input(_("Remove the current settings of this interface? (This causes a momentary disconnection of the network.) (y/n) ")).lower()
-        if _input.startswith("y"):
-            print(_("Removing interface configuration:"), end=' ')
-            try:
-                if iface.id is not None:
-                    iface.int_ipv4address = ''
-                    iface.int_ipv4address_b = ''
-                    iface.int_v4netmaskbit = ''
-                    iface.int_dhcp = False
-                    iface.int_v6netmaskbit = ''
-                    iface.int_ipv6address = ''
-                    iface.int_ipv6auto = False
-                    iface.int_vip = ''
-                    iface.int_vhid = None
-                    iface.int_pass = ''
-                    iface.int_critical = False
-                    iface.save()
-            except Exception as err:
-                print(_("Failed %s") % str(err))
-                return False
-            print(_("Ok"))
-            print(_("Restarting network:"), end=' ')
-            try:
-                with Client() as c:
-                    c.call('service.start', 'network')
-            except Exception:
-                print(_("Failed"))
-            print(_("ok"))
-            print(_("Restarting routing:"), end=' ')
-            try:
-                with Client() as c:
-                    c.call('service.reload', 'networkgeneral')
-            except Exception:
-                print(_("Failed"))
-            print(_("ok"))
-            return True
-        elif _input.startswith('n'):
-            break
-        else:
-            continue
-
-    need_restart = False
-    while True:
-        if not Interfaces.objects.filter(int_dhcp=True):
-            _input = input(_("Configure interface for DHCP? (y/n) "))
-            if _input.lower().startswith("y"):
-                int_name_prompt = prompt(_("Interface name"), iface.int_name)
-                int_name = input(int_name_prompt)
-                if not int_name and iface.int_name:
-                    int_name = iface.int_name
-                iface.int_interface = nic
-                iface.int_dhcp = True
-                iface.int_ipv4address = ''
-                iface.int_ipv4address_b = ''
-                iface.int_v4netmaskbit = ''
-                iface.int_v6netmaskbit = ''
-                iface.int_ipv6address = ''
-                iface.int_ipv6auto = False
-                print(_("Saving interface configuration:"), end=' ')
-                try:
-                    iface.save()
-                except Exception as err:
-                    print(_("Failed %s") % str(err))
+                _input = int(_input)
+            except ValueError:
+                if _input.lower().startswith("q"):
                     return False
-                print(_("Ok"))
-                need_restart = "DHCP"
-                break
-            elif _input.lower().startswith('n'):
+                else:
+                    print("Invalid option")
+                    continue
+
+            if _input in range(1, len(nics) + 1):
+                nic = nics[_input - 1]
                 break
             else:
+                print("Invalid option")
                 continue
-        else:
-            break
+    else:
+        print("No interfaces detected!")
+        return False
 
-    with Client() as c:
-        is_enterprise = c.call('system.is_enterprise')
-        failover_node = failover_licensed = False
-        if is_enterprise:
+    # check to see if this interface has already been configured or exists in the db
+    iface_configured = []
+    try:
+        with Client() as c:
+            iface_configured = c.call('datastore.query', 'network.interfaces', [('int_interface', '=', nic)])[0]
+    except Exception:
+        pass
+
+    # we need to delete the interface from db before we proceed
+    if iface_configured:
+        while True:
+            print("Interface has been previously configured, the current configuration must be deleted before proceeding.")
+            _input = input("Delete interface configuration? (y/n): ")
+            if _input.lower().startswith("y"):
+
+                print("Deleting interface configuration.")
+                try:
+                    with Client() as c:
+                        c.call('interface.delete', iface_configured['int_interface'])
+                        c.call('service.start', 'network')
+                        print("Successfully deleted interface configuration.")
+                        return True
+                except Exception as e:
+                    print("Failed deleting interface configuration with error: \n%s", e)
+                    # no reason to continue if this fails
+                    return False
+
+            elif _input.lower().startswith('n'):
+                return False
+
+            else:
+                print("Invalid option")
+                continue
+
+    # get HA related configuration
+    is_enterprise = failover_licensed = failover_node = False
+    try:
+        with Client() as c:
+            is_enterprise = c.call('system.is_enterprise')
             failover_licensed = c.call('failover.licensed')
             failover_node = c.call('failover.node')
+    except Exception:
+        # this is bad on HA systems but it's safe to say that many other
+        # problems are occurring so ignore
+        pass
 
-    while True and need_restart != "DHCP":
-        yes = input(_("Configure IPv4? (y/n) "))
-        if yes.lower().startswith("y"):
-            int_name_prompt = prompt(_("Interface name"), iface.int_name)
-            int_name = input(int_name_prompt)
-            if not int_name and iface.int_name:
-                int_name = iface.int_name
-            if is_enterprise:
-                if failover_licensed:
-                    if failover_node == 'A':
-                        ip_label = "IPv4 Address (This TrueNAS Controller)"
-                        ip_b_label = "IPv4 Address (TrueNAS Controller 2)"
+    # DHCPv4/v6 configuration section
+    dhcp_options = {}
+    _dhcp_input = input("Configure interface for DHCPv4/v6? (y/n): ")
+    if _dhcp_input.lower().startswith("y"):
+        if failover_licensed:
+            print("DHCPv4/v6 is not supported on HA systems.")
+            return False
+        else:
+            dhcp_menu = {
+                '1': ('DHCPv4', {'ipv4_dhcp': True}),
+                '2': ('DHCPv6', {'ipv6_auto': True}),
+                '3': ('DHCPv4 and DHCPv6', {'ipv4_dhcp': True, 'ipv6_auto': True}),
+                '4': ('Quit', 'not_used'),
+            }
+            while True:
+                for k, v in dhcp_menu.items():
+                    print(f'{k}) {v[0]}')
+                _dhcp_option = input(f"Choose an option between 1-{len(dhcp_menu)}: ")
+                if _dhcp_option in dhcp_menu.keys():
+                    if _dhcp_option == '4':
+                        return False
                     else:
-                        ip_label = "IPv4 Address (TrueNAS Controller 1)"
-                        ip_b_label = "IPv4 Address (This TrueNAS Controller)"
-                    ip_prompt = prompt(ip_label, iface.int_ipv4address)
-                    ip_b_prompt = prompt(ip_b_label, iface.int_ipv4address_b)
+                        dhcp_options = dhcp_menu[_dhcp_option][1]
+                        break
                 else:
-                    ip_prompt = prompt(
-                        "IPv4 Address", iface.int_ipv4address if failover_node == 'A' else iface.int_ipv4address_b
-                    )
+                    print("Invalid option")
+                    continue
+
+    # interface name section
+    _int_name = nic
+    while True:
+        _change_name = input(f'Change interface name? (default is "{nic}") (y/n): ')
+        if _change_name.lower().startswith('y'):
+            _new_name = input("New name: ")
+            if _new_name.isdigit():
+                print("Interface names cannot be numbers.")
+                continue
+            elif not _new_name.strip():
+                print("New name cannot be empty")
+                continue
             else:
-                ip_prompt = prompt("IPv4 Address", iface.int_ipv4address)
-
-            mask_prompt = prompt("IPv4 Netmask", iface.int_v4netmaskbit)
-            print(_("Several input formats are supported"))
-            print(_("Example 1 CIDR Notation:"))
-            print("    192.168.1.1/24")
-            print(_("Example 2 IP and Netmask separate:"))
-            print("    IP: 192.168.1.1")
-            print("    Netmask: 255.255.255.0, /24 or 24")
-
-            ip = ip_b = mask = None
-            while True:
-                ip = input(ip_prompt)
-
-                if not ip and iface.int_ipv4address:
-                    ip = iface.int_ipv4address
-
-                if failover_licensed:
-                    ip_b = input(ip_b_prompt)
-
-                    if not ip_b and iface.int_ipv4address_b:
-                        ip_b = iface.int_ipv4address_b
-
-                try:
-                    try:
-                        ipaddr.IPNetwork(ip, version=4)
-                    except ValueError:
-                        print(_("Invalid value entered: %s") % ip)
-                        continue
-                    ip, mask = ip.split('/')
-
-                    if failover_licensed:
-                        try:
-                            ipaddr.IPNetwork(ip_b, version=4)
-                        except ValueError:
-                            print(_("Invalid value entered: %s") % ip_b)
-                            continue
-                        ip_b, mask = ip_b.split('/')
-                    break
-                except Exception:
-                    mask = input(mask_prompt)
-                    if mask.startswith("/"):
-                        mask = mask.lstrip("/")
-                    if not mask and iface.int_v4netmaskbit:
-                        mask = iface.int_v4netmaskbit
-                        break
-                    elif re.match(
-                        r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9]"
-                        "[0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|"
-                        "[01]?[0-9][0-9]?)$", mask
-                    ):
-                        try:
-                            ipaddr.IPAddress(mask, version=4)
-                        except ValueError:
-                            print(_("Invalid Netmask"))
-                            continue
-                        mask = quad_to_cidr(mask)
-                        break
-                    elif re.match("^(0[xX])?([0-9a-fA-F]){8}$", mask):
-                        mask = hex_to_cidr(mask)
-                        break
-                    elif int(mask) > 0 and int(mask) < 33:
-                        mask = int(mask, 10)
-                        break
-                    else:
-                        print(_("""Enter netmask as a dotted quad, a hex number,
-or CIDR prefix
-Acceptable formats are 255.255.255.0,
-0xffffff00,
-/24, or 24"""))
-                        continue
-
-            iface.int_interface = nic
-            iface.int_name = int_name
-            iface.int_ipv4address = ip
-            iface.int_ipv4address_b = ip_b or ''
-            iface.int_v4netmaskbit = mask
-            iface.int_dhcp = False
-            iface.int_v6netmaskbit = ''
-            iface.int_ipv6address = ''
-            iface.int_ipv6auto = False
-            print(_("Saving interface configuration:"), end=' ')
-            try:
-                iface.save()
-            except Exception:
-                print(_("Failed"))
-                return False
-            print(_("Ok"))
-            need_restart = True
-            break
-        elif yes.lower().startswith("n"):
-            break
-
-    while True:
-        yes = input(_("Configure IPv6? (y/n) "))
-        if yes.lower().startswith("y"):
-            ip_prompt = prompt("IPv6 Address", iface.int_ipv6address)
-            mask_prompt = prompt("IPv6 Prefixlen", iface.int_v6netmaskbit)
-
-            ip = mask = None
-            ip = input(ip_prompt)
-            if not ip and iface.int_ipv6address:
-                ip = iface.int_ipv6address
-
-            try:
-                try:
-                    ipaddr.IPNetwork(ip, version=6)
-                except ValueError:
-                    print(_("Invalid value entered"))
-                    continue
-                ip, mask = ip.split('/')
-            except Exception:
-                while True:
-                    mask = input(mask_prompt)
-                    if not mask and iface.int_v6netmaskbit:
-                        mask = iface.int_v6netmaskbit
-                        break
-                    if mask.startswith("/"):
-                        mask = mask.lstrip("/")
-                    if int(mask) > 0 and int(mask) < 128:
-                        mask = int(mask)
-                    else:
-                        print(_("Enter ipv6 prefixlen as number of bits, eg: 64"))
-                        continue
-
-            iface.int_interface = nic
-            iface.int_ipv6address = ip
-            iface.int_v6netmaskbit = mask
-
-            print(_("Saving interface configuration:"), end=' ')
-            try:
-                iface.save()
-            except Exception:
-                print(_("Failed"))
-                return False
-            print(_("Ok"))
-            if not need_restart:
-                need_restart = True
-            break
-
-        elif yes.lower().startswith("n"):
-            break
-
-    while True:
-        if not failover_licensed:
-            break
-        yes = input(_("Configure failover settings? (y/n) "))
-        if yes.lower().startswith("y"):
-
-            while True:
-                vip_prompt = prompt("Virtual IP (Do not give a netmask)", iface.int_vip)
-                vip = input(vip_prompt)
-                if not vip and iface.int_vip:
-                    vip = iface.int_vip
-                elif vip:
-                    try:
-                        ipaddr.IPAddress(vip)
-                    except ValueError:
-                        print('Invalid Virtual IP')
-                        continue
-                iface.int_vip = vip
+                _int_name = _new_name
                 break
-
-            while True:
-                vhid_prompt = prompt("VHID", iface.int_vhid)
-                vhid = input(vhid_prompt)
-                if not vhid and iface.int_vhid:
-                    vhid = iface.int_vhid
-                elif vhid:
-                    try:
-                        vhid = int(vhid)
-                    except ValueError:
-                        print('VHID should be an integer')
-                        continue
-                    if vhid < 1 or vhid > 255:
-                        print('VHID should be between 1 and 255')
-                        continue
-                iface.int_vhid = vhid
-                break
-
-            while True:
-                intcrit = input(_("Mark interface as Critical for Failover? (y/n) "))
-                if intcrit.lower().startswith("y"):
-                    iface.int_critical = True
-                elif intcrit.lower().startswith("n"):
-                    iface.int_critical = False
-                else:
-                    print(_("Please select y or n"))
-                    continue
-                break
-
-            pwd_prompt = prompt("Password", iface.int_pass)
-            passwd = input(pwd_prompt)
-            if not passwd and iface.int_pass:
-                passwd = iface.int_pass
-            iface.int_pass = passwd
-
-            print(_("Saving interface configuration:"), end=' ')
-            try:
-                iface.save()
-            except Exception:
-                print(_("Failed"))
-                return False
-            print(_("Ok"))
-            if not need_restart:
-                need_restart = True
+        elif _change_name.lower().startswith('n'):
             break
-
-        elif yes.lower().startswith("n"):
+        elif not _change_name.strip():
             break
+        else:
+            continue
 
-    if need_restart:
-        print(_("Restarting network:"), end=' ')
+    # means interface is configured for dhcp
+    if dhcp_options:
+
+        # make sure we include the new name
+        options = {'name': _int_name}
+        options.update(dhcp_options)
+
+        print("Saving interface configuration.")
         try:
             with Client() as c:
+                c.call('interface.update', nic, options)
                 c.call('service.start', 'network')
-        except Exception:
-            print(_("Failed"))
-        print(_("ok"))
-    if need_restart == "DHCP":
-        print(_("Restarting routing:"), end=' ')
-        try:
-            with Client() as c:
-                c.call('service.reload', 'networkgeneral')
-        except Exception:
-            print(_("Failed"))
-        print(_("ok"))
-        return True
+                return True
+        except Exception as e:
+            print("Failed saving interface configuration with error: \n%s", e)
+            return False
+
+    ip_menu = {
+        '1': "Configure IPv4",
+        '2': "Configure IPv6",
+        '3': "Quit",
+    }
+    ip_vers = {'ipv4': False, 'ipv6': False}
+    while True:
+        # prompt the end-user for IP config
+        for k, v in ip_menu.items():
+            print(f"{k}) {v}")
+
+        _ip_input = input(f"Choose an option between 1-{len(ip_menu)}: ")
+        if _ip_input in ip_menu.keys():
+            if _ip_input == '3':
+                return False
+            elif _ip_input == '1':
+                ip_vers['ipv4'] = True
+                break
+            elif _ip_input == '2':
+                ip_vers['ipv6'] = True
+                break
+        else:
+            print("Choose a valid option.")
+            continue
+
+    # HA IPv4/v6 section
+    if is_enterprise and failover_licensed:
+        license_ip_info = {
+            'ip_a_nodea': ["PLACEHOLDER", "IP Address (This TrueNAS Controller): "],
+            'ip_b_nodea': ["PlACEHOLDER", "IP Address (TrueNAS Controller B): "],
+            'ip_a_nodeb': ["PLACEHOLDER", "IP Address (TrueNAS Controller A): "],
+            'ip_b_nodeb': ["PlACEHOLDER", "IP Address (This TrueNAS Controller): "],
+            'ip_vip': ["PLACEHOLDER", "Virtual IP Address (Failover IP): "],
+            'ip_vhid': ["PLACEHOLDER", "VHID: "],
+            'ip_crit': ["PLACEHOLDER", "Mark interface critical for failover? (y/n): "],
+            'ip_grp': ["PLACEHOLDER", "Failover group id: "],
+        }
+        if failover_node == 'A':
+            license_ip_info.pop('ip_a_nodeb')
+            license_ip_info.pop('ip_b_nodeb')
+        else:
+            license_ip_info.pop('ip_a_nodea')
+            license_ip_info.pop('ip_b_nodea')
+
+        for k, v in license_ip_info.items():
+
+            # vhid is only applicable on freebsd
+            if k == 'ip_vhid' and not IS_LINUX:
+                continue
+
+            # handle IP config
+            if k in ('ip_a_node', 'ip_b_node'):
+                while True:
+                    if ip_vers['ipv4']:
+                        print("\nSeveral input formats are supported")
+                        print("Example 1 CIDR Notation:")
+                        print("    192.168.1.1/24 or 192.168.1.1/255.255.255.0")
+                        print("Example 2 IP and Netmask separate:")
+                        print("    IP Address: 192.168.1.1")
+                        print("    Netmask: 255.255.255.0, /24 or 24\n")
+                    elif ip_vers['ipv6']:
+                        print("\nSeveral input formats are supported")
+                        print("Example 1 CIDR Notation:")
+                        print("    2001:db8:aaaa:1111::100/64")
+                        print("Example 2 IP and Prefix separate:")
+                        print("    IP Address: 2001:db8:aaaa:1111::100")
+                        print("    Prefix: /64 or 64\n")
+
+                    # prompt and store the results
+                    v[0] = input(v[1])
+
+                    # without a '/' assume only IP was given
+                    final = netmask = None
+                    if '/' not in v[0] or netmask is None:
+                        if ip_vers['ipv4']:
+                            netmask = input("Netmask: ")
+                        elif ip_vers['ipv6']:
+                            netmask = input("Prefix: ")
+
+                        netmask = netmask.split('/')[0]
+
+                    final = v[0] + '/' + netmask if netmask is not None else v[0]
+
+                    try:
+                        if ip_vers['ipv4']:
+                            v[0] = ipaddress.IPv4Interface(final)
+                            break
+                        elif ip_vers['ipv6']:
+                            v[0] = ipaddress.IPv6Interface(final)
+                            break
+                    except (ipaddress.AddressValueError, ipaddress.NetmaskValueError):
+                        print('Invalid IP address')
+                        continue
+
+            # handle VIP config
+            vip_netmask = None
+            if k == 'ip_vip':
+                while True:
+                    # VIP netmask/prefix are static
+                    if ip_vers['ipv4']:
+                        vip_netmask = '32'
+                    elif ip_vers['ipv6']:
+                        vip_netmask = '128'
+
+                    # make sure to remove netmask/prefix
+                    # if it was given to us
+                    v[0] = input(v[1])
+                    v[0] = v[0].split('/')[0]
+                    final = v[0] + '/' + vip_netmask
+                    try:
+                        if ip_vers['ipv4']:
+                            v[0] = ipaddress.IPv4Interface(final)
+                            break
+                        elif ip_vers['ipv6']:
+                            v[0] = ipaddress.IPv6Interface(final)
+                            break
+                    except (ipaddress.AddressValueError, ipaddress.NetmaskValueError):
+                        print('Invalid IP address')
+                        continue
+
+            # handle VHID config
+            if k == 'ip_vhid':
+                while True:
+                    v[0] = input(v[1])
+                    try:
+                        v[0] = int(v[0])
+                    except ValueError:
+                        print("VHID should be an integer")
+                        continue
+
+                    # validate VHID is within range
+                    if v[0] < 1 or v[0] > 255:
+                        print("VHID should be between 1 and 255")
+                        continue
+                    else:
+                        break
+
+            # handle failover group config
+            if k == 'ip_grp':
+                while True:
+                    v[0] = input(v[1])
+                    try:
+                        v[0] = int(v[0])
+                    except ValueError:
+                        print("Failover group should be an integer")
+                        continue
+                    else:
+                        break
+
+            # handle marking it critical for failover
+            if k == 'ip_crit':
+                while True:
+                    v[0] = input(v[1])
+                    if v[0].lower().startswith('y'):
+                        v[0] = True
+                        break
+                    elif v[0].lower().startswith('n'):
+                        v[0] = False
+                        break
+                    else:
+                        print('Invalid response')
+                        continue
+
+    # non-HA ipv4/v6 section
+    else:
+        non_license_ip_info = {
+            'ip': ["PLACEHOLDER", "IP Address: "],
+        }
+        for k, v in non_license_ip_info.items():
+
+            # handle IP config
+            if k == 'ip':
+                while True:
+                    if ip_vers['ipv4']:
+                        print("\nSeveral input formats are supported")
+                        print("Example 1 CIDR Notation:")
+                        print("    192.168.1.1/24 or 192.168.1.1/255.255.255.0")
+                        print("Example 2 IP and Netmask separate:")
+                        print("    IP Address: 192.168.1.1")
+                        print("    Netmask: 255.255.255.0, /24 or 24\n")
+                    elif ip_vers['ipv6']:
+                        print("\nSeveral input formats are supported")
+                        print("Example 1 CIDR Notation:")
+                        print("    2001:db8:aaaa:1111::100/64")
+                        print("Example 2 IP and Prefix separate:")
+                        print("    IP Address: 2001:db8:aaaa:1111::100")
+                        print("    Prefix: /64 or 64\n")
+
+                    # now prompt and store the results
+                    v[0] = input(v[1])
+
+                    final = netmask = None
+                    if '/' not in v[0] and netmask is None:
+                        if ip_vers['ipv4']:
+                            netmask = input("Netmask: ")
+                        elif ip_vers['ipv6']:
+                            netmask = input("Prefix: ")
+
+                        netmask = netmask.split('/')[0]
+
+                    final = v[0] + '/' + netmask if netmask is not None else v[0]
+
+                    try:
+                        if ip_vers['ipv4']:
+                            v[0] = ipaddress.IPv4Interface(final)
+                            break
+                        elif ip_vers['ipv6']:
+                            v[0] = ipaddress.IPv6Interface(final)
+                            break
+                    except (ipaddress.AddressValueError, ipaddress.NetmaskValueError):
+                        print('Invalid IP address')
+                        continue
+
+    # getting here means all static IP address prompts were answered
+    # so send it off to middleware API
+    print("Saving interface configuration changes.")
+    try:
+
+        # set the ip version
+        ip_type = 'INET' if not ip_vers['ipv6'] else 'INET6'
+
+        # HA config
+        if failover_licensed:
+            # build our list of options
+            final_options = {
+                'name': _int_name,
+                'aliases': [],
+                'failover_group': None,
+                'failover_vhid': None,
+                'failover_critical': False,
+            }
+
+            aliases = failover_aliases = failover_virtual_aliases = []
+            if failover_node == 'A':
+                aliases.append({
+                    'type': ip_type,
+                    'address': str(license_ip_info['ip_a_nodea'][0].ip),
+                    'netmask': license_ip_info['ip_a_nodea'][0].netmask._prefix_from_ip_string(str(license_ip_info['ip_a_nodea'][0].netmask)),
+                })
+                failover_aliases.append({
+                    'type': ip_type,
+                    'address': str(license_ip_info['ip_b_nodea'][0].ip),
+                    'netmask': license_ip_info['ip_a_nodea'][0].netmask._prefix_from_ip_string(str(license_ip_info['ip_a_nodea'][0].netmask)),
+                })
+                failover_virtual_aliases.append({
+                    'type': ip_type,
+                    'address': str(license_ip_info['ip_vip'][0].ip),
+                    'netmask': license_ip_info['ip_vip'][0].netmask._prefix_from_ip_string(str(license_ip_info['ip_vip'][0].netmask)),
+                })
+            else:
+                aliases.append({
+                    'type': ip_type,
+                    'address': str(license_ip_info['ip_b_nodeb'][0].ip),
+                    'netmask': license_ip_info['ip_a_nodea'][0].netmask._prefix_from_ip_string(str(license_ip_info['ip_a_nodea'][0].netmask)),
+                })
+                failover_aliases.append({
+                    'type': ip_type,
+                    'address': str(license_ip_info['ip_b_nodea'][0].ip),
+                    'netmask': license_ip_info['ip_a_nodea'][0].netmask._prefix_from_ip_string(str(license_ip_info['ip_a_nodea'][0].netmask)),
+                })
+                failover_virtual_aliases.append({
+                    'type': ip_type,
+                    'address': str(license_ip_info['ip_vip'][0].ip),
+                    'netmask': license_ip_info['ip_vip'][0].netmask._prefix_from_ip_string(str(license_ip_info['ip_vip'][0].netmask)),
+                })
+
+            final_options['aliases'].append(aliases[0])
+            final_options['failover_aliases'] = failover_aliases[0]
+            final_options['failover_virtual_aliases'] = failover_virtual_aliases[0]
+            final_options['failover_critical'] = license_ip_info['ip_crit']
+            final_options['failover_group'] = license_ip_info['ip_grp']
+            if not IS_LINUX:
+                final_options['failover_vhid'] = license_ip_info['ip_vhid']
+
+        # non HA config
+        else:
+
+            final_options = {
+                'name': _int_name,
+                'aliases': [{
+                    'type': ip_type,
+                    'address': str(non_license_ip_info['ip'][0].ip),
+                    'netmask': non_license_ip_info['ip'][0].netmask._prefix_from_ip_string(str(non_license_ip_info['ip'][0].netmask)),
+                }]
+            }
+
+        # finally send off the request to the API
+        with Client() as c:
+            c.call('interface.update', nic, final_options)
+            c.call('service.start', 'network')
+            print("Successfully changed interface settings.")
+            return True
+    except Exception as e:
+        print("Failed saving interface configuration changes with error: \n%s", e)
+        return False
 
 
 def reset_root_pw(*args):
@@ -1492,6 +1567,7 @@ def show_ip():
         print()
         print(_("The web interface could not be accessed."))
         print(_("Please check network configuration."))
+
     print()
 
 
