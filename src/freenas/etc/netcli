@@ -358,46 +358,6 @@ class HTTPSConnectionPoolNoWarn(HTTPSConnectionPool):
 poolmanager.pool_classes_by_scheme['https'] = HTTPSConnectionPoolNoWarn
 
 
-def quad_to_cidr(quad):
-    vals = {
-        0: True, 128: True, 192: True,
-        224: True, 240: True, 248: True,
-        252: True, 254: True, 255: True
-    }
-
-    count = 0
-    octets = quad.split('.')
-    for octet in octets:
-        i = 7
-        o = int(octet)
-        if vals.get(o):
-            while i >= 0:
-                if o & (1 << i):
-                    count += 1
-                else:
-                    return count
-                i -= 1
-
-        else:
-            return False
-
-    return count
-
-
-def hex_to_cidr(_hex):
-    h = _hex.replace("0x", "")
-    h = h.replace("0X", "")
-    h = int(h, 16)
-
-    i = 31
-    count = 0
-    while h & (1 << i):
-        count += 1
-        i -= 1
-
-    return count
-
-
 def prompt(prompt_str, default_value=None):
     """Returns a string that forms a prompt, based on values passed in"""
     if default_value:
