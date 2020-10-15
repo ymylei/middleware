@@ -67,6 +67,23 @@ def _(s):
     return s
 
 
+def get_nic_choices():
+
+    """
+    Helper function to generate a list of all
+    detected interfaces.
+    """
+
+    choices = []
+    try:
+        with Client() as c:
+            choices = sorted([i['id'] for i in c.call('interface.query')])
+    except Exception as e:
+        print('Failed to obtain list of interfaces with error: \n%s', e)
+
+    return choices
+
+
 class NICChoices(object):
     """Populate a list of NIC choices"""
     def __init__(self, nolagg=False, novlan=False, noloopback=True, notap=True,
@@ -450,21 +467,16 @@ def configure_interface_stub(*args):
 
 def configure_interface():
 
-    choices = []
-    try:
-        # get the interfaces
-        with Client() as c:
-            choices = c.call('interface.query')
-    except Exception as e:
-        print("Fatal error obtaining interfaces with error: \n%s", e)
-        return False
+    # get list of nics
+    choices = get_nic_choices()
 
-    if choices:
-        # sort the nics and then print them numbered
-        # starting at number 1
-        nics = sorted(i['id'] for i in choices)
+    # this shouldn't happen but check anyway
+    if not choices:
+        print('No interfaces detected!')
+        return False
+    else:
         while True:
-            for idx, nic in enumerate(nics, start=1):
+            for idx, nic in enumerate(choices, start=1):
                 print(f"{idx}) {nic}")
 
             _input = input("Select an interface (q to quit): ")
@@ -477,15 +489,12 @@ def configure_interface():
                     print("Invalid option")
                     continue
 
-            if _input in range(1, len(nics) + 1):
-                nic = nics[_input - 1]
+            if _input in range(1, len(choices) + 1):
+                nic = choices[_input - 1]
                 break
             else:
                 print("Invalid option")
                 continue
-    else:
-        print("No interfaces detected!")
-        return False
 
     # check to see if this interface has already been configured or exists in the db
     iface_configured = []
