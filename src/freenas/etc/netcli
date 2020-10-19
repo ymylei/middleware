@@ -1084,89 +1084,56 @@ def configure_vlan(*args):
             return False
 
 
-def configure_ipv4_default_route(gc):
-    gwprompt = prompt(_("IPv4 Default Route"), gc.gc_ipv4gateway)
-
-    gateway = input(gwprompt)
-    if gateway:
-        try:
-            ipaddr.IPAddress(gateway, version=4)
-        except ValueError:
-            print(_("Invalid value entered"))
-            return False
-        gc.gc_ipv4gateway = gateway
-
-        print(_("Saving IPv4 gateway:"), end=' ')
-        try:
-            gc.save()
-        except Exception:
-            print(_("Failed"))
-            return False
-        print(_("Ok"))
-        return True
-    else:
-        print(_("No default route entered."))
-        return False
-
-
-def configure_ipv6_default_route(gc):
-    gwprompt = prompt(_("IPv6 Default Route"), gc.gc_ipv6gateway)
-
-    gateway = input(gwprompt)
-    if gateway:
-        try:
-            ipaddr.IPAddress(gateway, version=6)
-        except ValueError:
-            print(_("Invalid value entered"))
-            return False
-        gc.gc_ipv6gateway = gateway
-        print(_("Saving IPv6 gateway:"), end=' ')
-        try:
-            gc.save()
-        except Exception:
-            print(_("Failed"))
-            return False
-        print(_("Ok"))
-        return True
-    else:
-        print(_("No default route entered."))
-        return False
-
-
 def configure_default_route(*args):
-    gc = GlobalConfiguration.objects.all()
-    gc = gc[0]
-    need_save = False
 
+    route_menu = {
+        '1': 'IPv4 default route',
+        '2': 'IPv6 default route',
+        '3': 'Quit',
+    }
+    ipv4 = ipv6 = False
     while True:
-        yes = input(_("Configure IPv4 Default Route? (y/n)"))
-        if yes.lower().startswith("y"):
-            need_save = configure_ipv4_default_route(gc)
-            break
-        elif yes.lower().startswith("n"):
-            break
+        for k, v in route_menu.items():
+            print(f'{k}) {v}')
 
-    while True:
-        yes = input(_("Configure IPv6 Default Route? (y/n)"))
-        if yes.lower().startswith("y"):
-            need_save = configure_ipv6_default_route(gc)
-            break
-        elif yes.lower().startswith("n"):
-            break
+        _route_option = input(f"Choose an option between 1-{len(route_menu)}: ")
+        if _route_option in route_menu.keys():
+            if _route_option == '3':
+                return False
+            elif _route_option == '1':
+                ipv4 = True
+            elif _route_option == '2':
+                ipv6 = True
+            ip_addr = input('IP Address: ')
 
-    if need_save:
-        print(_("Restarting routing:"), end=' ')
+        else:
+            print("Invalid option")
+            continue
+
         try:
-            with Client() as c:
-                c.call('route.sync')
-        except Exception:
-            print(_("Failed"))
-            return False
-        print(_("ok"))
-        return True
-    else:
-        print(_("Routing configuration unchanged."))
-        return True
+            if ipv4:
+                def_gw = ipaddress.IPv4Interface(ip_addr)
+                break
+            elif ipv6:
+                def_gw = ipaddress.IPv6Interface(ip_addr)
+                break
+        except (ipaddress.AddressValueError, ipaddress.NetmaskValueError):
+            print('\nInvalid IP address')
+            continue
+
+    print("Updating default route")
+    try:
+        with Client() as c:
+            c.call(
+                'network.globalconfiguration.update',
+                {'ipv4gateway' if ipv4 else 'ipv6gateway': str(def_gw.ip)}
+            )
+            c.call('route.sync')
+            print('Successfully updated default route')
+            return True
+    except Exception as e:
+        print("Failed to update default route with error: \n%s", e)
+        return False
 
 
 def configure_static_routes(*args):
