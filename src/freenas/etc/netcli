@@ -168,7 +168,6 @@ def produce_django_model(ds):
     return Model
 
 
-GlobalConfiguration = produce_django_model("network.globalconfiguration")
 StaticRoute = produce_django_model("network.staticroute")
 Support = produce_django_model("system.support")
 
@@ -1176,75 +1175,45 @@ def configure_static_routes(*args):
 
 
 def configure_dns(*args):
-    ns1 = ns2 = ns3 = domain = None
-    gc = GlobalConfiguration.objects.all()
-    gc = gc[0]
 
-    domain_prompt = prompt(_("DNS Domain"), gc.gc_domain)
-    ns1_prompt = prompt(_("DNS Nameserver 1"), gc.gc_nameserver1)
-    ns2_prompt = prompt(_("DNS Nameserver 2"), gc.gc_nameserver2)
-    ns3_prompt = prompt(_("DNS Nameserver 3"), gc.gc_nameserver3)
+    _domain_name = input("DNS domain name (empty to skip): ")
 
-    domain = input(domain_prompt)
-    if domain:
-        gc.gc_domain = domain
+    nameservers = {1: '', 2: '', 3: ''}
+    print("Enter IP address of nameserver(s). (empty ends input)")
+    keep_going = True
+    while keep_going:
+        for k, v in nameservers.items():
+            ns = input(f"Nameserver {k} IP: ")
 
-    need_save = False
-    print(_("Enter nameserver IPs, an empty value ends input"))
-    while True:
-        ns1 = input(ns1_prompt)
-        if ns1:
-            try:
-                ipaddr.IPAddress(ns1, version=4)
-            except ValueError:
-                print(_("Invalid nameserver"))
+            # means they didn't give a nameserver
+            if k == 1 and not ns:
                 return False
-            gc.gc_nameserver1 = ns1
-            need_save = True
-            gc.gc_nameserver2 = ''
-            gc.gc_nameserver3 = ''
-        else:
-            return False
-
-        ns2 = input(ns2_prompt)
-        if ns2:
-            try:
-                ipaddr.IPAddress(ns2, version=4)
-            except ValueError:
-                print(_("Invalid nameserver"))
+            elif k >= 2 and not ns:
+                keep_going = False
                 break
-            gc.gc_nameserver2 = ns2
-        else:
-            break
 
-        ns3 = input(ns3_prompt)
-        if ns3:
             try:
-                ipaddr.IPAddress(ns3, version=4)
-            except ValueError:
-                print(_("Invalid nameserver"))
-                break
-            gc.gc_nameserver3 = ns3
-        break
+                ns = ipaddress.IPv4Address(ns)
+                nameservers[k] = ns
+            except ipaddress.AddressValueError:
+                try:
+                    ipaddress.IPv6Address(ns)
+                except ipaddress.AddressValueError:
+                    print("Invalid IP address")
+                    break
 
-    if need_save:
-        print(_("Saving DNS configuration:"), end=' ')
-        try:
-            gc.save()
-        except Exception:
-            print(_("Failed"))
-            return False
-        print(_("ok"))
-
-        print(_("Reloading network config:"), end=' ')
-        try:
-            with Client() as c:
-                c.call('service.reload', 'networkgeneral')
-        except Exception:
-            print(_("Failed"))
-            return False
-        print(_("ok"))
-        return True
+    print("Updating DNS settings")
+    try:
+        with Client() as c:
+            c.call('network.configuration.update', {
+                'domain': _domain_name,
+                'nameserver1': nameservers[1].exploded,
+                'nameserver2': nameservers[2].exploded if nameservers[2] else nameservers[2],
+                'nameserver3': nameservers[3].exploded if nameservers[3] else nameservers[3],
+            })
+    except Exception as e:
+        print("Failed updating DNS settings with error: \n%s", e)
+        return False
 
 
 def shell(*args):
