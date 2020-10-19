@@ -36,7 +36,6 @@ import time
 import traceback
 
 import ipaddress
-import ipaddr
 import sqlite3
 
 from middlewared.client import Client
@@ -168,7 +167,6 @@ def produce_django_model(ds):
     return Model
 
 
-StaticRoute = produce_django_model("network.staticroute")
 Support = produce_django_model("system.support")
 
 
@@ -1136,42 +1134,48 @@ def configure_default_route(*args):
 
 
 def configure_static_routes(*args):
-    dest = input(_("Destination network: "))
-    gateway = input(_("Gateway: "))
-    desc = input(_("Description: "))
 
-    try:
-        ipaddr.IPNetwork(dest)
-    except ValueError:
-        print(_("Invalid destination network"))
-        return False
-    try:
-        ipaddr.IPAddress(gateway)
-    except ValueError:
-        print(_("Invalid gateway"))
-        return False
+    while True:
+        dest_net = input("Destination network: ")
+        try:
+            dest_net = ipaddress.IPv4Network(dest_net)
+        except (ValueError, ipaddress.AddressValueError, ipaddress.NetmaskValueError):
+            try:
+                dest_net = ipaddress.IPv6Network(dest_net)
+            except (ValueError, ipaddress.AddressValueError, ipaddress.NetmaskValueError):
+                print("Invalid network")
+                continue
 
-    sr = StaticRoute()
-    sr.sr_destination = dest
-    sr.sr_gateway = gateway
-    if desc:
-        sr.sr_description = desc
-    print(_("Saving static route:"), end=' ')
+        gateway = input("Gateway for destination network: ")
+        try:
+            gateway = ipaddress.IPv4Address(gateway)
+        except (ipaddress.AddressValueError, ipaddress.NetmaskValueError):
+            try:
+                gateway = ipaddress.IPv6Address(gateway)
+            except (ipaddress.AddressValueError, ipaddress.NetmaskValueError):
+                print("Invalid IP address")
+                continue
+
+        # need to make sure the gateway is in the destination network
+        if gateway.exploded not in list(str(i) for i in dest_net.hosts()):
+            print("Gateway is not in the destination network.")
+            continue
+        else:
+            desc = input("Description (empty to skip): ")
+            break
+
+    print("Creating static route")
     try:
-        sr.save()
-    except Exception:
-        print(_("Failed"))
-        return False
-    print(_("ok"))
-    try:
-        print(_("Restarting routing:"), end=' ')
         with Client() as c:
-            c.call('service.reload', 'networkgeneral')
-    except Exception:
-        print(_("Failed"))
+            c.call('staticroute.create', {
+                'destination': dest_net.with_prefixlen,
+                'gateway': gateway.exploded,
+                'description': desc,
+            })
+            return True
+    except Exception as e:
+        print("Failed creating static route with error: \n%s ", e)
         return False
-    print(_("ok"))
-    return True
 
 
 def configure_dns(*args):
