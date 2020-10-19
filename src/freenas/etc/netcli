@@ -167,9 +167,6 @@ def produce_django_model(ds):
     return Model
 
 
-Support = produce_django_model("system.support")
-
-
 class FailoverIsEnabledException(Exception):
     pass
 
@@ -1225,23 +1222,72 @@ def shell(*args):
 
 
 def automatic_ix_alert(*args):
-    support = Support.objects.order_by('-id')[0]
-    if support.enabled:
-        text = _("enabled")
-    else:
-        text = _("disabled")
-    print(_("Automatic support alerts to iXsystems: %s") % text)
+
+    data = []
+    try:
+        with Client() as c:
+            data = c.call('datastore.query', 'system.support')[0]
+    except Exception as e:
+        print("Failed to query database about proactive support with error: \n%s", e)
+        return False
+
+    print(f"Proactive alerts are currently {'enabled' if data['enabled'] else 'disabled'}")
     while True:
-        if support.enabled:
-            ret = input(_("Disable (y/n): "))
-        else:
-            ret = input(_("Enable (y/n): "))
-        if ret.lower().startswith("y"):
-            support.enabled = not support.enabled
-            support.save()
-            return True
-        if ret.lower().startswith("n"):
+        _input = input(f"{'Enable' if not data['enabled'] else 'Disable'} (y/n): ")
+        if _input.lower().startswith('y'):
+            data['enabled'] = not data['enabled']
+            break
+        elif _input.lower().startswith('n') or not _input:
             return False
+        else:
+            print("Invalid option")
+            continue
+
+    # if they're enabling proactive support, they have to fill out
+    # the rest of the information
+    if data['enabled']:
+        print("Please fill out the following information")
+        while True:
+            pri_name = input("Primary contact name: ")
+            pri_title = input("Primary contact title: ")
+            pri_email = input("Primary contact email: ")
+            pri_phone = input("Primary contact phone: ")
+            sec_name = input("Secondary contact name: ")
+            sec_title = input("Secondary contact title: ")
+            sec_email = input("Secondary contact email: ")
+            sec_phone = input("Secondary contact phone: ")
+            break
+
+        # all fields are required for some reason
+        for i in (
+            pri_name, pri_title, pri_email, pri_phone,
+            sec_name, sec_title, sec_email, sec_phone,
+        ):
+            if not i:
+                print("Please fill out all requested information")
+                continue
+
+    print(f"{'Enabling' if data['enabled'] else 'Disabling'}")
+    try:
+        with Client() as c:
+            if data['enabled']:
+                c.call('support.update', {
+                    'enabled': data['enabled'],
+                    'name': pri_name,
+                    'title': pri_title,
+                    'email': pri_email,
+                    'phone': pri_phone,
+                    'secondary_name': sec_name,
+                    'secondary_title': sec_title,
+                    'secondary_email': sec_email,
+                    'secondary_phone': sec_phone,
+                })
+            else:
+                c.call('support.update', {'enabled': data['enabled']})
+            return True
+    except Exception as e:
+        print("Failed updating proactive support alerts with error: \n%s", e)
+        return False
 
 
 def reboot(*args):
