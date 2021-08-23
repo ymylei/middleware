@@ -16,13 +16,14 @@ class EnclosureService(Service):
     }
 
     @private
-    def r50_nvme_enclosures(self):
-        system_product = self.middleware.call_sync("system.info")["system_product"]
-        if system_product != "TRUENAS-R50":
+    def r50_nvme_enclosures(self, product=None):
+        if product is None:
+            product = self.middleware.call_sync('system.dmidecode_info')['system-product-name']
+
+        if product != 'TRUENAS-R50':
             return []
 
         nvme_to_nvd = self.middleware.call_sync('disk.nvme_to_nvd_map')
-
         slot_to_nvd = {}
         for nvme, nvd in nvme_to_nvd.items():
             try:
